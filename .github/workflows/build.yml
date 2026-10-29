@@ -1,0 +1,46 @@
+name: Build APK from zip
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack project from zip
+        run: |
+          ZIP=MtzForge.zip
+          [ -f "$ZIP" ] || ZIP=$(ls *.zip 2>/dev/null | head -n1)
+          if [ -z "$ZIP" ]; then echo "В репозитории нет zip-архива с проектом"; exit 1; fi
+          echo "Собираю из: $ZIP"
+          mkdir -p src
+          unzip -q -o "$ZIP" -d src
+          SETTINGS=$(find src -name settings.gradle.kts | head -n1)
+          if [ -z "$SETTINGS" ]; then echo "В архиве не найден settings.gradle.kts"; exit 1; fi
+          echo "PROJECT_DIR=$(dirname "$SETTINGS")" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Build
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Collect APK
+        run: |
+          mkdir -p out
+          cp "$PROJECT_DIR"/app/build/outputs/apk/release/*.apk out/MtzForge-${{ github.run_number }}.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MtzForge-apk
+          path: out/*.apk
