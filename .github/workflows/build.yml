@@ -14,12 +14,12 @@ jobs:
         run: |
           ZIP=MtzForge.zip
           [ -f "$ZIP" ] || ZIP=$(ls *.zip 2>/dev/null | head -n1)
-          if [ -z "$ZIP" ]; then echo "В репозитории нет zip-архива с проектом"; exit 1; fi
+          if [ -z "$ZIP" ]; then echo "::error::В репозитории нет zip-архива с проектом"; exit 1; fi
           echo "Собираю из: $ZIP"
           mkdir -p src
           unzip -q -o "$ZIP" -d src
           SETTINGS=$(find src -name settings.gradle.kts | head -n1)
-          if [ -z "$SETTINGS" ]; then echo "В архиве не найден settings.gradle.kts"; exit 1; fi
+          if [ -z "$SETTINGS" ]; then echo "::error::В архиве не найден settings.gradle.kts"; exit 1; fi
           echo "PROJECT_DIR=$(dirname "$SETTINGS")" >> "$GITHUB_ENV"
 
       - uses: actions/setup-java@v4
@@ -33,7 +33,35 @@ jobs:
 
       - name: Build
         working-directory: ${{ env.PROJECT_DIR }}
-        run: gradle assembleRelease --no-daemon --stacktrace
+        run: |
+          set -o pipefail
+          gradle assembleRelease --no-daemon --stacktrace 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+
+      - name: Show errors
+        if: failure()
+        run: |
+          LOG="$GITHUB_WORKSPACE/build.log"
+          [ -f "$LOG" ] || exit 0
+          grep -E "^e: |error:|ERROR:|AAPT|Could not resolve|Could not find|What went wrong" "$LOG" | head -n 40 | while IFS= read -r line; do
+            short=$(echo "$line" | sed -E 's#file:///[^ ]*/src/main/java/##; s#/home/runner/work/[^ ]*/src/main/##')
+            echo "::error::$short"
+          done
+          {
+            echo "## Ошибки сборки"
+            echo '```'
+            grep -E "^e: |error:|ERROR:|AAPT|Could not resolve|Could not find" "$LOG" | sed -E 's#file:///[^ ]*/src/main/java/##' | head -n 60
+            echo '```'
+            echo '```'
+            grep -A12 "What went wrong" "$LOG" | head -n 30
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
 
       - name: Collect APK
         run: |
