@@ -3,14 +3,7 @@ name: Build APK
 on:
   push:
     branches: [ "main", "master" ]
-    tags: [ "v*" ]
   workflow_dispatch:
-    inputs:
-      publish_to_rustore:
-        description: 'Отправить собранный APK в RuStore по API'
-        required: false
-        default: false
-        type: boolean
 
 jobs:
   build:
@@ -20,17 +13,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Unpack project archive if needed
+      - name: Unpack MtzForge.zip if needed
         run: |
-          if [ ! -f "settings.gradle.kts" ]; then
+          if ! find . -maxdepth 2 -name "settings.gradle.kts" | grep -q .; then
             ZIP_FILE=$(find . -maxdepth 2 -name "*.zip" | head -n 1)
             if [ -n "$ZIP_FILE" ]; then
-              echo "Найден архив: $ZIP_FILE. Распаковываем..."
+              echo "Распаковываем архив: $ZIP_FILE"
               unzip -q -o "$ZIP_FILE"
-            fi
-            if [ -d "MtzForge" ] && [ -f "MtzForge/settings.gradle.kts" ]; then
-              cp -rf MtzForge/* .
-              cp -rf MtzForge/.* . 2>/dev/null || true
+            else
+              echo "Ошибка: не найден ни settings.gradle.kts, ни .zip архив!"
+              exit 1
             fi
           fi
 
@@ -45,26 +37,32 @@ jobs:
 
       - name: Build Release APK
         run: |
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-            ./gradlew assembleRelease --no-daemon
+          GRADLE_DIR=$(dirname $(find . -maxdepth 3 -name "settings.gradle.kts" | head -n 1))
+          echo "Собираем проект в папке: $GRADLE_DIR"
+          if [ -f "$GRADLE_DIR/gradlew" ]; then
+            chmod +x "$GRADLE_DIR/gradlew"
+            "$GRADLE_DIR/gradlew" -p "$GRADLE_DIR" assembleRelease --no-daemon
           else
-            gradle assembleRelease --no-daemon
+            gradle -p "$GRADLE_DIR" assembleRelease --no-daemon
           fi
 
-      - name: Re-sign APK with GitHub Secrets (if KEYSTORE_BASE64 is set)
+      - name: Sign APK with 4 GitHub Secrets
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
           SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
           SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: |
-          RAW_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          RAW_APK=$(find . -path "*/outputs/apk/release/*.apk" | head -n 1)
+          if [ -z "$RAW_APK" ]; then
+            echo "Ошибка: собранный APK не найден!"
+            exit 1
+          fi
           if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "Переподписываем APK ключом из GitHub Secrets..."
-            echo "$KEYSTORE_BASE64" | base64 --decode > release.keystore
+            echo "Переподписываем APK вашим ключом из Secrets..."
+            echo "$KEYSTORE_BASE64" | tr -d ' \n\r\t' | base64 --decode > release.keystore
             BUILD_TOOLS=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
-            "$BUILD_TOOLS/zipalign" -p -f -v 4 "$RAW_APK" aligned.apk
+            "$BUILD_TOOLS/zipalign" -p -f 4 "$RAW_APK" aligned.apk
             "$BUILD_TOOLS/apksigner" sign \
               --ks release.keystore \
               --ks-key-alias "$SIGNING_KEY_ALIAS" \
@@ -72,10 +70,10 @@ jobs:
               --key-pass env:SIGNING_KEY_PASSWORD \
               --out MtzForge-release.apk \
               aligned.apk
-            "$BUILD_TOOLS/apksigner" verify --verbose MtzForge-release.apk
+            "$BUILD_TOOLS/apksigner" verify -v MtzForge-release.apk
             rm -f release.keystore aligned.apk
           else
-            echo "KEYSTORE_BASE64 не задан — используем подпись forge.keystore из архива"
+            echo "Секрет KEYSTORE_BASE64 пуст, оставляем подпись из архива"
             cp "$RAW_APK" MtzForge-release.apk
           fi
 
@@ -85,64 +83,6 @@ jobs:
           name: MtzForge-apk
           path: MtzForge-release.apk
 
-      - name: Publish to RuStore API (on Tag or Manual toggle)
-        if: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.publish_to_rustore == true) && secrets.RUSTORE_KEY_ID != '' }}
-        env:
-          PACKAGE_NAME: "com.bluequark.mtzforge"
-          KEY_ID: ${{ secrets.RUSTORE_KEY_ID }}
-          PRIVATE_KEY: ${{ secrets.RUSTORE_PRIVATE_KEY }}
-          APK_PATH: "MtzForge-release.apk"
-        run: |
-          pip install cryptography requests
-          python3 - << 'EOF'
-          import os, base64, datetime, requests
-          from cryptography.hazmat.primitives import hashes, serialization
-          from cryptography.hazmat.primitives.asymmetric import padding
-
-          pkg = os.environ["PACKAGE_NAME"]
-          key_id = os.environ["KEY_ID"]
-          raw_key = os.environ["PRIVATE_KEY"].strip()
-          apk_path = os.environ["APK_PATH"]
-
-          pem = f"-----BEGIN PRIVATE KEY-----\n{raw_key}\n-----END PRIVATE KEY-----".encode()
-          private_key = serialization.load_pem_private_key(pem, password=None)
-          timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
-          msg = f"{key_id}{timestamp}".encode()
-          signature = base64.b64encode(private_key.sign(msg, padding.PKCS1v15(), hashes.SHA512())).decode()
-
-          auth_resp = requests.post("https://public-api.rustore.ru/public/auth", json={
-              "keyId": key_id,
-              "timestamp": timestamp,
-              "signature": signature
-          })
-          auth_resp.raise_for_status()
-          jwe_token = auth_resp.json()["body"]["jwe"]
-          headers = {"Public-Token": jwe_token}
-
-          draft_resp = requests.post(
-              f"https://public-api.rustore.ru/public/v1/application/{pkg}/version",
-              headers=headers,
-              json={"publishType": "INSTANTLY"}
-          )
-          draft_resp.raise_for_status()
-          version_id = draft_resp.json()["body"]
-
-          with open(apk_path, "rb") as f:
-              up_resp = requests.post(
-                  f"https://public-api.rustore.ru/public/v1/application/{pkg}/version/{version_id}/apk",
-                  headers=headers,
-                  params={"servicesType": "Unknown", "isMainApk": "true"},
-                  files={"file": ("MtzForge-release.apk", f, "application/vnd.android.package-archive")}
-              )
-              up_resp.raise_for_status()
-
-          commit_resp = requests.post(
-              f"https://public-api.rustore.ru/public/v1/application/{pkg}/version/{version_id}/commit",
-              headers=headers
-          )
-          commit_resp.raise_for_status()
-          print("Версия успешно отправлена на модерацию в RuStore!")
-          EOF
 
       - uses: actions/upload-artifact@v4
         with:
