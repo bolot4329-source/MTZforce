@@ -1,4 +1,4 @@
-name: Build & Release APK
+name: Build APK
 
 on:
   push:
@@ -20,50 +20,78 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Unpack project archive if needed
+        run: |
+          if [ ! -f "settings.gradle.kts" ]; then
+            ZIP_FILE=$(find . -maxdepth 2 -name "*.zip" | head -n 1)
+            if [ -n "$ZIP_FILE" ]; then
+              echo "Найден архив: $ZIP_FILE. Распаковываем..."
+              unzip -q -o "$ZIP_FILE"
+            fi
+            if [ -d "MtzForge" ] && [ -f "MtzForge/settings.gradle.kts" ]; then
+              cp -rf MtzForge/* .
+              cp -rf MtzForge/.* . 2>/dev/null || true
+            fi
+          fi
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
-          cache: 'gradle'
 
-      - name: Decode Keystore from GitHub Secrets
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Release APK
         run: |
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 --decode > app/release.keystore
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            ./gradlew assembleRelease --no-daemon
           else
-            echo "KEYSTORE_BASE64 не задан, используется локальный app/forge.keystore"
+            gradle assembleRelease --no-daemon
           fi
 
-      - name: Build Signed Release APK
+      - name: Re-sign APK with GitHub Secrets (if KEYSTORE_BASE64 is set)
         env:
-          SIGNING_STORE_FILE: ${{ secrets.KEYSTORE_BASE64 != '' && 'release.keystore' || 'forge.keystore' }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
           SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
           SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: |
-          chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon
-
-      - name: Rename APK for convenience
-        run: |
-          cp app/build/outputs/apk/release/*.apk app/build/outputs/apk/release/MtzForge-release.apk
+          RAW_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "Переподписываем APK ключом из GitHub Secrets..."
+            echo "$KEYSTORE_BASE64" | base64 --decode > release.keystore
+            BUILD_TOOLS=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
+            "$BUILD_TOOLS/zipalign" -p -f -v 4 "$RAW_APK" aligned.apk
+            "$BUILD_TOOLS/apksigner" sign \
+              --ks release.keystore \
+              --ks-key-alias "$SIGNING_KEY_ALIAS" \
+              --ks-pass env:SIGNING_STORE_PASSWORD \
+              --key-pass env:SIGNING_KEY_PASSWORD \
+              --out MtzForge-release.apk \
+              aligned.apk
+            "$BUILD_TOOLS/apksigner" verify --verbose MtzForge-release.apk
+            rm -f release.keystore aligned.apk
+          else
+            echo "KEYSTORE_BASE64 не задан — используем подпись forge.keystore из архива"
+            cp "$RAW_APK" MtzForge-release.apk
+          fi
 
       - name: Upload MtzForge-apk Artifact
         uses: actions/upload-artifact@v4
         with:
           name: MtzForge-apk
-          path: app/build/outputs/apk/release/MtzForge-release.apk
+          path: MtzForge-release.apk
 
-      - name: Upload to RuStore API (on Tag or Manual toggle)
+      - name: Publish to RuStore API (on Tag or Manual toggle)
         if: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.publish_to_rustore == true) && secrets.RUSTORE_KEY_ID != '' }}
         env:
           PACKAGE_NAME: "com.bluequark.mtzforge"
           KEY_ID: ${{ secrets.RUSTORE_KEY_ID }}
           PRIVATE_KEY: ${{ secrets.RUSTORE_PRIVATE_KEY }}
-          APK_PATH: "app/build/outputs/apk/release/MtzForge-release.apk"
+          APK_PATH: "MtzForge-release.apk"
         run: |
           pip install cryptography requests
           python3 - << 'EOF'
@@ -76,14 +104,12 @@ jobs:
           raw_key = os.environ["PRIVATE_KEY"].strip()
           apk_path = os.environ["APK_PATH"]
 
-          # 1. Формируем PEM и подписываем запрос авторизации (SHA512withRSA)
           pem = f"-----BEGIN PRIVATE KEY-----\n{raw_key}\n-----END PRIVATE KEY-----".encode()
           private_key = serialization.load_pem_private_key(pem, password=None)
           timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
           msg = f"{key_id}{timestamp}".encode()
           signature = base64.b64encode(private_key.sign(msg, padding.PKCS1v15(), hashes.SHA512())).decode()
 
-          # 2. Получаем JWE-токен RuStore
           auth_resp = requests.post("https://public-api.rustore.ru/public/auth", json={
               "keyId": key_id,
               "timestamp": timestamp,
@@ -93,7 +119,6 @@ jobs:
           jwe_token = auth_resp.json()["body"]["jwe"]
           headers = {"Public-Token": jwe_token}
 
-          # 3. Создаём черновик новой версии
           draft_resp = requests.post(
               f"https://public-api.rustore.ru/public/v1/application/{pkg}/version",
               headers=headers,
@@ -101,9 +126,7 @@ jobs:
           )
           draft_resp.raise_for_status()
           version_id = draft_resp.json()["body"]
-          print(f"Черновик версии создан: ID {version_id}")
 
-          # 4. Загружаем APK
           with open(apk_path, "rb") as f:
               up_resp = requests.post(
                   f"https://public-api.rustore.ru/public/v1/application/{pkg}/version/{version_id}/apk",
@@ -112,9 +135,7 @@ jobs:
                   files={"file": ("MtzForge-release.apk", f, "application/vnd.android.package-archive")}
               )
               up_resp.raise_for_status()
-          print("APK успешно загружен в RuStore")
 
-          # 5. Отправляем на модерацию
           commit_resp = requests.post(
               f"https://public-api.rustore.ru/public/v1/application/{pkg}/version/{version_id}/commit",
               headers=headers
