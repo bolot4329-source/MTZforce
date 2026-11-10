@@ -1,15 +1,8 @@
 # MTZ Forge
 
-<p align="center">
-  <img src="docs/screenshots/screenshot_1_1920x1080.png" width="720" alt="MTZ Forge — тема значков для HyperOS из PSD и PNG">
-</p>
 
 Приложение для Android, которое собирает тему значков `.mtz` для **Xiaomi HyperOS** прямо на телефоне — без компьютера, Root и Shizuku. Открываете свой `.psd` из Photoshop, пачку `.png` или готовую тему-донора, настраиваете цвета — и на выходе готовый `.mtz`, который ставится через стандартное приложение «Темы».
 
-<p>
-  <img src="docs/screenshots/screenshot_2_1920x1080.png" width="350" alt="Значки внутри системных приложений">
-  <img src="docs/screenshots/screenshot_3_1920x1080.png" width="350" alt="Применение темы и проверка значков">
-</p>
 
 **📖 [Руководство пользователя](docs/TUTORIAL.md)** — все функции подробно, шаг за шагом, с нуля.
 
