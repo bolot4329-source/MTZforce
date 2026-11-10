@@ -1,0 +1,10 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+
+# Ключи подписи — никогда не коммитить
+*.keystore
+*.jks
+keystore/
