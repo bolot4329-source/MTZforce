@@ -2,87 +2,55 @@ name: Build APK
 
 on:
   push:
-    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Unpack MtzForge.zip if needed
-        run: |
-          if ! find . -maxdepth 2 -name "settings.gradle.kts" | grep -q .; then
-            ZIP_FILE=$(find . -maxdepth 2 -name "*.zip" | head -n 1)
-            if [ -n "$ZIP_FILE" ]; then
-              echo "Распаковываем архив: $ZIP_FILE"
-              unzip -q -o "$ZIP_FILE"
-            else
-              echo "Ошибка: не найден ни settings.gradle.kts, ни .zip архив!"
-              exit 1
-            fi
-          fi
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
+          distribution: temurin
+          java-version: 17
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
 
-      - name: Build Release APK
-        run: |
-          GRADLE_DIR=$(dirname $(find . -maxdepth 3 -name "settings.gradle.kts" | head -n 1))
-          echo "Собираем проект в папке: $GRADLE_DIR"
-          if [ -f "$GRADLE_DIR/gradlew" ]; then
-            chmod +x "$GRADLE_DIR/gradlew"
-            "$GRADLE_DIR/gradlew" -p "$GRADLE_DIR" assembleRelease --no-daemon
-          else
-            gradle -p "$GRADLE_DIR" assembleRelease --no-daemon
-          fi
-
-      - name: Sign APK with 4 GitHub Secrets
+      # Ключ подписи не хранится в репозитории. Если в настройках репозитория
+      # заданы секреты (Settings → Secrets and variables → Actions):
+      #   FORGE_KEYSTORE_BASE64, FORGE_STORE_PASSWORD, FORGE_KEY_ALIAS, FORGE_KEY_PASSWORD
+      # — APK подпишется релизным ключом. Иначе — debug-подписью.
+      - name: Decode signing keystore
         env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
-          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
-          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+          FORGE_KEYSTORE_BASE64: ${{ secrets.FORGE_KEYSTORE_BASE64 }}
+          FORGE_STORE_PASSWORD: ${{ secrets.FORGE_STORE_PASSWORD }}
+          FORGE_KEY_ALIAS: ${{ secrets.FORGE_KEY_ALIAS }}
+          FORGE_KEY_PASSWORD: ${{ secrets.FORGE_KEY_PASSWORD }}
         run: |
-          RAW_APK=$(find . -path "*/outputs/apk/release/*.apk" | head -n 1)
-          if [ -z "$RAW_APK" ]; then
-            echo "Ошибка: собранный APK не найден!"
-            exit 1
-          fi
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "Переподписываем APK вашим ключом из Secrets..."
-            echo "$KEYSTORE_BASE64" | tr -d ' \n\r\t' | base64 --decode > release.keystore
-            BUILD_TOOLS=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
-            "$BUILD_TOOLS/zipalign" -p -f 4 "$RAW_APK" aligned.apk
-            "$BUILD_TOOLS/apksigner" sign \
-              --ks release.keystore \
-              --ks-key-alias "$SIGNING_KEY_ALIAS" \
-              --ks-pass env:SIGNING_STORE_PASSWORD \
-              --key-pass env:SIGNING_KEY_PASSWORD \
-              --out MtzForge-release.apk \
-              aligned.apk
-            "$BUILD_TOOLS/apksigner" verify -v MtzForge-release.apk
-            rm -f release.keystore aligned.apk
+          if [ -n "$FORGE_KEYSTORE_BASE64" ]; then
+            mkdir -p keystore
+            printf '%s' "$FORGE_KEYSTORE_BASE64" | base64 -d > keystore/forge.keystore
+            {
+              echo "FORGE_KEYSTORE_FILE=$PWD/keystore/forge.keystore"
+              echo "FORGE_STORE_PASSWORD=$FORGE_STORE_PASSWORD"
+              echo "FORGE_KEY_ALIAS=$FORGE_KEY_ALIAS"
+              echo "FORGE_KEY_PASSWORD=$FORGE_KEY_PASSWORD"
+            } >> "$GITHUB_ENV"
+            echo "Релизный ключ загружен из секретов"
           else
-            echo "Секрет KEYSTORE_BASE64 пуст, оставляем подпись из архива"
-            cp "$RAW_APK" MtzForge-release.apk
+            echo "Секреты подписи не заданы — APK будет подписан debug-ключом"
           fi
 
-      - name: Upload MtzForge-apk Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: MtzForge-apk
-          path: MtzForge-release.apk
+      - name: Build
+        run: gradle assembleRelease --no-daemon --stacktrace
 
+      - name: Rename APK
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/release/*.apk out/MtzForge-${{ github.run_number }}.apk
 
       - uses: actions/upload-artifact@v4
         with:
