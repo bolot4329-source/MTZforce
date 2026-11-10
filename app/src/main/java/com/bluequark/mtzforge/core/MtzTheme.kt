@@ -46,7 +46,7 @@ class MtzTheme private constructor(
 
     companion object {
         // значок может лежать в res/drawable-xxhdpi/, в res/drawable/ или прямо в корне icons
-        private val iconPath = Regex("^(?:res/drawable(?:-[^/]+)?/)?([^/]+)\.(png|webp)$")
+        private val iconPath = Regex("^(?:res/drawable(?:-[^/]+)?/)?([^/]+)\\.(png|webp)$")
         private val perAppDirs = listOf("fancy_icons/", "layer_animating_icons/", "animating_icons/", "dynamic_icons/")
 
         fun read(file: File): MtzTheme {
