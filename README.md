@@ -55,27 +55,3 @@
 
 * **Через GitHub Actions (без Android Studio):** в репозитории настроен workflow `.github/workflows/build.yml`. При пуше или ручном запуске во вкладке **Actions → Build APK** собирается готовый APK, который можно забрать внизу страницы сборки в блоке **Artifacts** (`MtzForge-apk`).
 * **Локально:** откройте папку проекта в Android Studio и запустите сборку **Build → Generate Signed App Bundle / APK**, либо выполните в терминале `gradle assembleRelease` (нужен установленный Gradle 8.x и Android SDK).
-
-### Подпись APK
-
-Ключ подписи **не хранится в репозитории**. Сборка работает в двух режимах:
-
-* **Без настройки:** APK подписывается стандартным debug-ключом — можно сразу устанавливать на своё устройство, но обновления будут несовместимы с версиями, подписанными другим ключом.
-* **С релизным ключом (рекомендуется):** создайте keystore командой
-
-  ```
-  keytool -genkeypair -v -keystore forge.keystore -alias forge -keyalg RSA -keysize 4096 -validity 10950
-  ```
-
-  и задайте параметры подписи одним из способов:
-
-  * локально — в `~/.gradle/gradle.properties` (НЕ в папке проекта):
-    ```
-    FORGE_KEYSTORE_FILE=/полный/путь/к/forge.keystore
-    FORGE_STORE_PASSWORD=пароль_keystore
-    FORGE_KEY_ALIAS=forge
-    FORGE_KEY_PASSWORD=пароль_ключа
-    ```
-  * для GitHub Actions — в **Settings → Secrets and variables → Actions** добавьте секреты `FORGE_KEYSTORE_BASE64` (результат `base64 -w0 forge.keystore`), `FORGE_STORE_PASSWORD`, `FORGE_KEY_ALIAS`, `FORGE_KEY_PASSWORD`.
-
-Файлы `*.keystore` и `*.jks` внесены в `.gitignore` — случайно закоммитить ключ не получится.
