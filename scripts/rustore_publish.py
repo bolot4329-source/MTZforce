@@ -227,12 +227,23 @@ def create_draft(session, base_url, package_name, token, whats_new, publish_type
         body["publishDateTime"] = publish_datetime
     if partial_value is not None:
         body["partialValue"] = partial_value
-    resp = api_request(
-        session, "POST",
-        f"{base_url}/public/v1/application/{package_name}/version",
-        token=token, json=body, headers={"Content-Type": "application/json"},
-    )
-    payload = check_code(resp, "Создание черновика версии")
+    try:
+        resp = api_request(
+            session, "POST",
+            f"{base_url}/public/v1/application/{package_name}/version",
+            token=token, json=body, headers={"Content-Type": "application/json"},
+        )
+        payload = check_code(resp, "Создание черновика версии")
+    except SystemExit:
+        # Идемпотентность при 5xx: шлюз мог вернуть 502/503/504, но черновик
+        # на сервере фактически создаться. Перед повторной попыткой/падением
+        # проверяем список версий: если DRAFT появился — используем его.
+        log("Ошибка при создании черновика. Проверяю, не создался ли он на сервере...")
+        recovered_id = find_draft(session, base_url, package_name, token)
+        if recovered_id is not None:
+            log(f"Черновик всё-таки существует, versionId={recovered_id} — использую его.")
+            return recovered_id
+        raise
     version_id = payload.get("body")
     if not isinstance(version_id, int):
         raise fail(f"Создание черновика: неожиданный body. Ответ API: {describe_response(resp)}")
