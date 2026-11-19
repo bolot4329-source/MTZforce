@@ -96,6 +96,24 @@ jobs:
           echo "path=$APK_PATH" >> "$GITHUB_OUTPUT"
           echo "Найден файл: $APK_PATH"
 
+      - name: Проверить отсутствие INTERNET в итоговом APK
+        run: |
+          # Manifest Merger может подтянуть INTERNET из транзитивной зависимости,
+          # а обоснование QUERY_ALL_PACKAGES (docs/rustore/) опирается на его
+          # отсутствие — поэтому проверяем собранный артефакт, а не исходный манифест.
+          AAPT2=$(find "$ANDROID_HOME/build-tools" -name aapt2 -type f | sort -V | tail -n 1)
+          if [ -z "$AAPT2" ]; then
+            echo "::error::aapt2 не найден в $ANDROID_HOME/build-tools"
+            exit 1
+          fi
+          PERMS=$("$AAPT2" dump permissions "${{ steps.artifact.outputs.path }}")
+          echo "$PERMS"
+          if echo "$PERMS" | grep -q "android.permission.INTERNET"; then
+            echo "::error::В итоговом APK есть android.permission.INTERNET — аргумент обоснования будет опровергнут модерацией. Уберите разрешение (tools:node=\"remove\") или поправьте docs/rustore/."
+            exit 1
+          fi
+          echo "android.permission.INTERNET отсутствует — обоснование корректно."
+
       - name: Подготовить CA-бандл (системный + НУЦ Минцифры)
         run: |
           cat /etc/ssl/certs/ca-certificates.crt \
@@ -131,6 +149,8 @@ jobs:
           python3 scripts/rustore_publish.py \
             --file "${{ steps.artifact.outputs.path }}" \
             --whats-new-file "${{ steps.changelog.outputs.file }}" \
+            --moder-info-file docs/rustore/moder_info.txt \
+            --privacy-explanation-file docs/rustore/privacy_explanation.txt \
             --publish-type "$PUBLISH_TYPE" \
             --priority-update "$PRIORITY" \
             $SUBMIT_FLAG
