@@ -8,6 +8,16 @@ rustore_publish.py — публикация новой версии прилож
 v2-эндпоинты для чтения/редактирования черновика, priorityUpdate 0..5,
 TLS через REQUESTS_CA_BUNDLE (сертификаты НУЦ Минцифры).
 
+Ревизия Gemini (2026-11-19, обоснование QUERY_ALL_PACKAGES):
+при создании черновика передаются moderInfo (комментарий модератору,
+до 180 символов) и privacyExplanation (обоснование чувствительных
+разрешений, до 4000 символов) из файлов docs/rustore/. Лимиты проверяются
+жёстко: превышение — ошибка сборки, молчаливой обрезки нет. Файлы читаются
+в UTF-8 (допускается BOM), переносы строк нормализуются. Если API отклоняет
+черновик с privacyExplanation, выполняется одна повторная попытка без него
+с заметным предупреждением в логе (обоснование тогда нужно внести вручную
+в веб-консоли до отправки на модерацию).
+
 Секреты читаются ТОЛЬКО из переменных окружения (никогда не передавать
 их аргументами командной строки — они попадут в логи CI):
   RUSTORE_KEY_ID        — Key ID из RuStore Console (раздел «API RuStore»)
@@ -30,6 +40,9 @@ TLS через REQUESTS_CA_BUNDLE (сертификаты НУЦ Минцифр�
   python3 scripts/rustore_publish.py --file app-release.apk --whats-new "Исправления"
   python3 scripts/rustore_publish.py --file app-release.aab --publish-type MANUAL --no-submit
   python3 scripts/rustore_publish.py --file app.apk --priority-update 3 --reuse-draft
+  python3 scripts/rustore_publish.py --file app.apk \
+      --moder-info-file docs/rustore/moder_info.txt \
+      --privacy-explanation-file docs/rustore/privacy_explanation.txt
 """
 
 from __future__ import annotations
@@ -56,6 +69,10 @@ MAX_RETRIES = 3
 RETRYABLE_STATUS = {502, 503, 504}
 
 VALID_PUBLISH_TYPES = {"MANUAL", "INSTANTLY", "DELAYED"}
+
+# Лимиты RuStore Public API на тексты при создании черновика.
+MODER_INFO_MAX = 180
+PRIVACY_EXPLANATION_MAX = 4000
 
 
 class RuStoreError(RuntimeError):
@@ -100,6 +117,33 @@ def load_private_key(raw: str):
         return serialization.load_der_private_key(der, password=None)
     except Exception as exc:  # noqa: BLE001
         raise fail(f"Не удалось загрузить приватный ключ (ожидается PKCS#8 DER): {exc}")
+
+
+def read_rustore_text(path: Path, label: str) -> str | None:
+    """Прочитать текстовый файл для поля RuStore.
+
+    UTF-8 (utf-8-sig безопасно убирает BOM, если файл отредактируют в
+    Windows-редакторе). Отсутствие переданного файла — ошибка сборки,
+    а не молчаливый пропуск поля. Пустой после очистки файл — поле
+    не отправляется вовсе (не шлём пустую строку).
+    """
+    if not path.is_file():
+        raise fail(f"{label}: файл не найден: {path}")
+    text = path.read_text(encoding="utf-8-sig")
+    if not text.strip():
+        log(f"{label}: файл {path} пуст — поле не будет отправлено.")
+        return None
+    return text
+
+
+def normalize_moder_info(text: str) -> str:
+    """moderInfo — однострочное поле: схлопываем переносы строк и лишние пробелы."""
+    return " ".join(text.split())
+
+
+def normalize_privacy_explanation(text: str) -> str:
+    """Нормализуем окончания строк, чтобы \r\n не съедал лимит символов."""
+    return text.replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
 def sign_auth(key, key_id: str, timestamp: str) -> str:
@@ -181,7 +225,7 @@ def get_token(session: requests.Session, base_url: str, key_id: str, key) -> str
     }
     resp = api_request(
         session, "POST", f"{base_url}/public/auth",
-        json=body, headers={"Content-Type": "application/json"},
+        json=body, headers={"Content-Type": "application/json; charset=utf-8"},
     )
     payload = check_code(resp, "Получение токена")
     token = (payload.get("body") or {}).get("jwe")
@@ -219,7 +263,8 @@ def delete_version(session, base_url, package_name, version_id, token):
 
 
 def create_draft(session, base_url, package_name, token, whats_new, publish_type,
-                 publish_datetime=None, partial_value=None):
+                 publish_datetime=None, partial_value=None,
+                 moder_info=None, privacy_explanation=None):
     body: dict = {"publishType": publish_type}
     if whats_new:
         body["whatsNew"] = whats_new[:5000]
@@ -227,11 +272,24 @@ def create_draft(session, base_url, package_name, token, whats_new, publish_type
         body["publishDateTime"] = publish_datetime
     if partial_value is not None:
         body["partialValue"] = partial_value
+    if moder_info:
+        if len(moder_info) > MODER_INFO_MAX:
+            raise fail(f"moderInfo: {len(moder_info)} символов при лимите {MODER_INFO_MAX}. "
+                       "Сократите текст в docs/rustore/moder_info.txt — "
+                       "молчаливая обрезка запрещена, чтобы не потерять концовку.")
+        body["moderInfo"] = moder_info
+    if privacy_explanation:
+        if len(privacy_explanation) > PRIVACY_EXPLANATION_MAX:
+            raise fail(f"privacyExplanation: {len(privacy_explanation)} символов при лимите "
+                       f"{PRIVACY_EXPLANATION_MAX}. Сократите текст в "
+                       "docs/rustore/privacy_explanation.txt — молчаливая обрезка запрещена.")
+        body["privacyExplanation"] = privacy_explanation
     try:
         resp = api_request(
             session, "POST",
             f"{base_url}/public/v1/application/{package_name}/version",
-            token=token, json=body, headers={"Content-Type": "application/json"},
+            token=token, json=body,
+            headers={"Content-Type": "application/json; charset=utf-8"},
         )
         payload = check_code(resp, "Создание черновика версии")
     except SystemExit:
@@ -311,6 +369,12 @@ def parse_args(argv=None):
                         help='Текст «Что нового» (до 5000 символов).')
     parser.add_argument("--whats-new-file", type=Path, default=None,
                         help="Путь к файлу с текстом «Что нового» (приоритетнее --whats-new).")
+    parser.add_argument("--moder-info-file", type=Path, default=None,
+                        help="Файл с комментарием для модератора (moderInfo, до "
+                             f"{MODER_INFO_MAX} символов, одна строка).")
+    parser.add_argument("--privacy-explanation-file", type=Path, default=None,
+                        help="Файл с обоснованием чувствительных разрешений "
+                             f"(privacyExplanation, до {PRIVACY_EXPLANATION_MAX} символов).")
     parser.add_argument("--publish-type", default="INSTANTLY",
                         choices=sorted(VALID_PUBLISH_TYPES),
                         help="Тип публикации после модерации (по умолчанию INSTANTLY).")
@@ -345,9 +409,23 @@ def main(argv=None) -> int:
     if args.whats_new_file:
         if not args.whats_new_file.is_file():
             raise fail(f"Файл «Что нового» не найден: {args.whats_new_file}")
-        whats_new = args.whats_new_file.read_text(encoding="utf-8").strip()
+        whats_new = args.whats_new_file.read_text(encoding="utf-8-sig").strip()
     elif args.whats_new:
         whats_new = args.whats_new.strip()
+
+    moder_info = None
+    if args.moder_info_file:
+        raw = read_rustore_text(args.moder_info_file, "Комментарий для модератора")
+        if raw is not None:
+            moder_info = normalize_moder_info(raw)
+            log(f"moderInfo: {len(moder_info)}/{MODER_INFO_MAX} символов.")
+
+    privacy_explanation = None
+    if args.privacy_explanation_file:
+        raw = read_rustore_text(args.privacy_explanation_file, "Обоснование разрешений")
+        if raw is not None:
+            privacy_explanation = normalize_privacy_explanation(raw)
+            log(f"privacyExplanation: {len(privacy_explanation)}/{PRIVACY_EXPLANATION_MAX} символов.")
 
     base_url = os.environ.get("RUSTORE_API_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
     log(f"RuStore API: {base_url}; приложение: {package_name}")
@@ -378,10 +456,27 @@ def main(argv=None) -> int:
 
     # Шаг 3. Создать черновик (если не переиспользуем существующий).
     if version_id is None:
-        version_id = create_draft(
-            session, base_url, package_name, token,
-            whats_new=whats_new, publish_type=args.publish_type,
-        )
+        try:
+            version_id = create_draft(
+                session, base_url, package_name, token,
+                whats_new=whats_new, publish_type=args.publish_type,
+                moder_info=moder_info, privacy_explanation=privacy_explanation,
+            )
+        except SystemExit:
+            if privacy_explanation is None:
+                raise
+            # Поле privacyExplanation могло не поддерживаться текущей версией API
+            # (400 Bad Request на неизвестный ключ). Повторяем без него и громко
+            # предупреждаем: обоснование тогда нужно внести вручную в веб-консоли.
+            log("[ВНИМАНИЕ] API отклонил черновик с privacyExplanation. "
+                "Повторяю создание без этого поля. Обоснование QUERY_ALL_PACKAGES "
+                "НЕ отправлено — перед отправкой на модерацию внесите его вручную "
+                "в веб-консоли RuStore (текст: docs/rustore/privacy_explanation.txt).")
+            version_id = create_draft(
+                session, base_url, package_name, token,
+                whats_new=whats_new, publish_type=args.publish_type,
+                moder_info=moder_info, privacy_explanation=None,
+            )
 
     # Шаг 4. Загрузить APK/AAB.
     upload_file(session, base_url, package_name, version_id, token, file_path)
