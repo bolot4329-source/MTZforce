@@ -24,8 +24,11 @@ android {
         applicationId = "com.bluequark.mtzforge"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        // versionCode должен быть СТРОГО больше, чем у любой ранее загруженной
+        // в RuStore версии (отклонённые модерацией тоже считаются).
+        // Предыдущая загрузка имела versionCode 53.
+        versionCode = 54
+        versionName = "5.4"
     }
 
     signingConfigs {
