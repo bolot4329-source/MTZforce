@@ -114,6 +114,15 @@ jobs:
           fi
           echo "android.permission.INTERNET отсутствует — обоснование корректно."
 
+      - name: Выложить APK как артефакт
+        # До первой опубликованной версии RuStore API черновики не создаёт —
+        # APK для ручной загрузки в консоль забираем отсюда (внизу страницы прогона).
+        uses: actions/upload-artifact@v4
+        with:
+          name: mtzforge-release-apk
+          path: ${{ steps.artifact.outputs.path }}
+          retention-days: 14
+
       - name: Подготовить CA-бандл (системный + НУЦ Минцифры)
         run: |
           cat /etc/ssl/certs/ca-certificates.crt \
